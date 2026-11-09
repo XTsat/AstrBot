@@ -4169,6 +4169,7 @@ CONFIG_METADATA_3 = {
                 "hint": "",
                 "description": "上下文管理策略",
                 "type": "object",
+                "collapsed": True,
                 "items": {
                     "agent.config.compression.max_turns": {
                         "description": "压缩前最多保留对话轮数",

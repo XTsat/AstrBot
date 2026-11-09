@@ -1,12 +1,13 @@
 <script setup>
 import { LazyMonacoEditor as VueMonacoEditor } from '@/components/shared/LazyMonacoEditor';
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import ConfigItemRenderer from './ConfigItemRenderer.vue'
 import ConfigDefaultReset from './ConfigDefaultReset.vue'
 import TemplateListEditor from './TemplateListEditor.vue'
 import { useI18n, useModuleI18n } from '@/i18n/composables'
 import { useConfigTextResolver } from '@/composables/useConfigTextResolver'
 import { useToast } from '@/utils/toast'
+import { FOLD_STATE_PREFIX, readFoldState, writeFoldState } from '@/utils/configFoldState.mjs'
 import { providerApi } from '@/api/v1'
 
 const props = defineProps({
@@ -183,21 +184,82 @@ function hasVisibleItemsAfter(items, currentIndex) {
 
   return false
 }
+
+// Every nested object group is foldable; the schema only decides its initial state
+// via `collapsed: true`. The root config object itself is never foldable. Toggling is
+// remembered for this page instance only, so reopening the page follows the schema.
+const isFoldable = computed(
+  () => Boolean(props.pathPrefix) && props.metadata?.[props.metadataKey]?.type === 'object'
+)
+const foldStateKey = computed(
+  () => `${FOLD_STATE_PREFIX}${props.pluginName}:${currentConfigPath.value}`
+)
+
+function getInitialFoldedState() {
+  return props.metadata?.[props.metadataKey]?.collapsed === true
+}
+
+function resolveFoldedState(key) {
+  const remembered = readFoldState(key)
+  return remembered === null ? getInitialFoldedState() : remembered
+}
+
+const isFolded = ref(resolveFoldedState(foldStateKey.value))
+const isSectionCollapsed = computed(() => isFoldable.value && isFolded.value)
+
+// Switching to another config (provider, platform, ...) reuses this instance, so the
+// remembered state must be re-read for the new group.
+watch(foldStateKey, (key) => {
+  isFolded.value = resolveFoldedState(key)
+})
+
+function toggleSection() {
+  if (!isFoldable.value) {
+    return
+  }
+  isFolded.value = !isFolded.value
+  writeFoldState(foldStateKey.value, isFolded.value)
+}
 </script>
 
 <template>
-  <div class="config-section" v-if="iterable && metadata[metadataKey]?.type === 'object'">
-    <v-list-item-title class="config-title">
-      {{ resolveConfigText(currentConfigPath, 'description', metadata[metadataKey]?.description) }}
-      <span v-if="metadata[metadataKey]?.show_key" class="metadata-key">({{ metadataKey }})</span>
-    </v-list-item-title>
-    <v-list-item-subtitle class="config-hint">
-      <span v-if="metadata[metadataKey]?.obvious_hint && metadata[metadataKey]?.hint" class="important-hint">‼️</span>
-      {{ resolveConfigText(currentConfigPath, 'hint', metadata[metadataKey]?.hint) }}
-    </v-list-item-subtitle>
+  <div
+    class="config-section"
+    :class="{ 'config-section--folded': isSectionCollapsed }"
+    v-if="iterable && metadata[metadataKey]?.type === 'object'"
+  >
+    <div
+      class="config-section-head"
+      :class="{
+        'config-section-head--foldable': isFoldable,
+        'config-section-head--folded': isSectionCollapsed,
+      }"
+      :role="isFoldable ? 'button' : undefined"
+      :tabindex="isFoldable ? 0 : undefined"
+      :aria-expanded="isFoldable ? !isSectionCollapsed : undefined"
+      :title="isFoldable ? (isSectionCollapsed ? t('core.common.expand') : t('core.common.collapse')) : undefined"
+      @click="toggleSection"
+      @keydown.enter.prevent="toggleSection"
+      @keydown.space.prevent="toggleSection"
+    >
+      <v-icon v-if="isFoldable" size="18" class="config-section-head__chevron">
+        {{ isSectionCollapsed ? 'mdi-chevron-right' : 'mdi-chevron-down' }}
+      </v-icon>
+      <div class="config-section-head__text">
+        <v-list-item-title class="config-title">
+          {{ resolveConfigText(currentConfigPath, 'description', metadata[metadataKey]?.description) }}
+          <span v-if="metadata[metadataKey]?.show_key" class="metadata-key">({{ metadataKey }})</span>
+        </v-list-item-title>
+        <v-list-item-subtitle class="config-hint">
+          <span v-if="metadata[metadataKey]?.obvious_hint && metadata[metadataKey]?.hint" class="important-hint">‼️</span>
+          {{ resolveConfigText(currentConfigPath, 'hint', metadata[metadataKey]?.hint) }}
+        </v-list-item-subtitle>
+      </div>
+    </div>
   </div>
 
-  <v-card-text class="px-0 py-1">
+  <v-expand-transition>
+    <v-card-text class="px-0 py-1" v-show="!isSectionCollapsed">
     <!-- Object Type Configuration -->
     <div v-if="metadata[metadataKey]?.type === 'object' || metadata[metadataKey]?.config_template" class="object-config">
       <!-- Provider-level hint -->
@@ -374,6 +436,7 @@ function hasVisibleItemsAfter(items, currentIndex) {
       <v-divider class="my-2 config-divider"></v-divider>
     </div>
   </v-card-text>
+  </v-expand-transition>
 
   <!-- Full Screen Editor Dialog -->
   <v-dialog v-model="dialog" fullscreen transition="dialog-bottom-transition" scrollable>
@@ -406,12 +469,65 @@ function hasVisibleItemsAfter(items, currentIndex) {
 <style scoped>
 .config-section {
   margin-bottom: 12px;
+  transition: margin-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .config-title {
   font-weight: 600;
   font-size: 1rem;
   color: var(--v-theme-primaryText);
+}
+
+.config-section-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.config-section-head--foldable {
+  cursor: pointer;
+  user-select: none;
+  /* Fill the container padding so the hover background reaches the card edges,
+     matching the template_list entry header. The container clips the corners. */
+  padding: 20px 12px 8px;
+  margin: -12px -12px 0;
+  border-radius: 0;
+  transition:
+    background-color 0.2s ease,
+    padding-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.config-section-head--foldable:hover {
+  background-color: rgba(0, 0, 0, 0.02);
+}
+
+/* Folded groups have no body, so the header absorbs the container bottom padding
+   too and the highlight fills the whole card. */
+.config-section-head--folded {
+  padding-bottom: 20px;
+  margin-bottom: -12px;
+}
+
+/* The wrapper's own margin would leave a strip under the folded header. */
+.config-section--folded {
+  margin-bottom: 0;
+}
+
+.config-section-head--foldable:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
+}
+
+.config-section-head__chevron {
+  margin-top: 4px;
+  color: var(--v-theme-secondaryText);
+  flex-shrink: 0;
+}
+
+.config-section-head__text {
+  flex: 1;
+  min-width: 0;
 }
 
 .config-hint {
@@ -451,6 +567,8 @@ function hasVisibleItemsAfter(items, currentIndex) {
   margin: 12px 0;
   background-color: rgba(0, 0, 0, 0.02);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  /* Keep the full-width fold header hover inside the rounded border. */
+  overflow: hidden;
 }
 
 .config-row {

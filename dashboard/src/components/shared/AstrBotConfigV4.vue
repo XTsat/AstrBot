@@ -7,6 +7,7 @@ import TemplateListEditor from './TemplateListEditor.vue'
 import PersonaQuickPreview from './PersonaQuickPreview.vue'
 import { useI18n, useModuleI18n } from '@/i18n/composables'
 import { useConfigTextResolver } from '@/composables/useConfigTextResolver'
+import { FOLD_STATE_PREFIX, readFoldState, writeFoldState } from '@/utils/configFoldState.mjs'
 
 
 const props = defineProps({
@@ -134,6 +135,36 @@ function createSelectorModel(selector) {
 
 function getItemPath(key) {
   return props.pathPrefix ? `${props.pathPrefix}.${key}` : key
+}
+
+// Every config section is foldable; `collapsed: true` in the schema only makes it
+// start folded. Toggling is remembered for this page instance only, so reopening the
+// page follows the schema.
+const sectionMeta = computed(() => props.metadata?.[props.metadataKey] || {})
+const isFoldable = computed(() => sectionMeta.value?.type === 'object')
+const foldStateKey = computed(
+  () => `${FOLD_STATE_PREFIX}${props.pathPrefix || props.metadataKey}`
+)
+
+function getInitialFoldedState() {
+  return sectionMeta.value?.collapsed === true
+}
+
+const isFolded = ref(
+  readFoldState(foldStateKey.value) ?? getInitialFoldedState()
+)
+
+// A search keyword always expands folded sections so matches stay reachable.
+const isSectionCollapsed = computed(
+  () => isFoldable.value && isFolded.value && !String(props.searchKeyword || '').trim()
+)
+
+function toggleSection() {
+  if (!isFoldable.value) {
+    return
+  }
+  isFolded.value = !isFolded.value
+  writeFoldState(foldStateKey.value, isFolded.value)
 }
 
 function getItemDescription(itemKey, itemMeta) {
@@ -268,182 +299,207 @@ function getSpecialSubtype(value) {
 
   <v-card v-if="shouldShowSection()" style="margin-bottom: 16px; padding-bottom: 8px; background-color: rgb(var(--v-theme-background));"
     rounded="md" variant="outlined">
-    <v-card-text class="config-section" v-if="metadata[metadataKey]?.type === 'object'" style="padding-bottom: 8px;">
-      <v-list-item-title class="config-title">
-        {{ translateIfKey(metadata[metadataKey]?.description) }}
-      </v-list-item-title>
-      <v-list-item-subtitle class="config-hint">
-        <span v-if="metadata[metadataKey]?.obvious_hint && metadata[metadataKey]?.hint" class="important-hint">‼️</span>
-        <span v-html="renderHint(metadata[metadataKey]?.hint)"></span>
-      </v-list-item-subtitle>
+    <v-card-text
+      class="config-section"
+      :class="{ 'config-section--folded': isSectionCollapsed }"
+      v-if="metadata[metadataKey]?.type === 'object'"
+    >
+      <div
+        class="config-section-head"
+        :class="{
+          'config-section-head--foldable': isFoldable,
+          'config-section-head--folded': isSectionCollapsed,
+        }"
+        :role="isFoldable ? 'button' : undefined"
+        :tabindex="isFoldable ? 0 : undefined"
+        :aria-expanded="isFoldable ? !isSectionCollapsed : undefined"
+        @click="toggleSection"
+        @keydown.enter.prevent="toggleSection"
+        @keydown.space.prevent="toggleSection"
+      >
+        <v-icon v-if="isFoldable" size="20" class="config-section-head__chevron">
+          {{ isSectionCollapsed ? 'mdi-chevron-right' : 'mdi-chevron-down' }}
+        </v-icon>
+        <div class="config-section-head__text">
+          <v-list-item-title class="config-title">
+            {{ translateIfKey(metadata[metadataKey]?.description) }}
+          </v-list-item-title>
+          <v-list-item-subtitle class="config-hint">
+            <span v-if="metadata[metadataKey]?.obvious_hint && metadata[metadataKey]?.hint" class="important-hint">‼️</span>
+            <span v-html="renderHint(metadata[metadataKey]?.hint)"></span>
+          </v-list-item-subtitle>
+        </div>
+      </div>
     </v-card-text>
 
     <!-- Object Type Configuration with JSON Selector Support -->
-    <div v-if="metadata[metadataKey]?.type === 'object'" class="object-config">
-      <div
-        v-for="([itemKey, itemMeta], index) in getVisibleItemEntries(false)"
-        :key="itemKey"
-        class="config-item"
-      >
-        <v-row v-if="!itemMeta?.invisible" class="config-row">
-          <v-col cols="12" :sm="itemMeta?.full_width ? 12 : 6" class="property-info">
-            <v-list-item density="compact">
-              <v-list-item-title class="property-name">
-                {{ getItemDescription(itemKey, itemMeta) }}
-                <span v-if="itemMeta?.show_key" class="property-key">({{ itemKey }})</span>
-              </v-list-item-title>
-
-              <v-list-item-subtitle class="property-hint">
-                <span v-if="itemMeta?.obvious_hint && itemMeta?.hint" class="important-hint">‼️</span>
-                <span v-html="renderHint(getItemHint(itemKey, itemMeta))"></span>
-              </v-list-item-subtitle>
-            </v-list-item>
-          </v-col>
-          <v-col cols="12" :sm="itemMeta?.full_width ? 12 : 6" class="config-input">
-            <TemplateListEditor
-              v-if="itemMeta?.type === 'template_list'"
-              v-model="createSelectorModel(itemKey).value"
-              :templates="itemMeta?.templates || {}"
-              :plugin-name="pluginName"
-              :plugin-i18n="pluginI18n"
-              :config-path="getItemPath(itemKey)"
-              class="config-field"
-            />
-            <ConfigItemRenderer
-              v-else
-              v-model="createSelectorModel(itemKey).value"
-              :item-meta="itemMeta || null"
-              :config-root="iterable"
-              :plugin-name="pluginName"
-              :plugin-i18n="pluginI18n"
-              :config-key="getItemPath(itemKey)"
-              :show-fullscreen-btn="!!itemMeta?.editor_mode"
-              @open-fullscreen="openEditorDialog(itemKey, iterable, itemMeta?.editor_theme, itemMeta?.editor_language)"
-            />
-          </v-col>
-        </v-row>
-
-        <v-row v-if="!itemMeta?.invisible && itemMeta?._special === 'select_plugin_set'"
-          class="plugin-set-display-row">
-          <v-col cols="12" class="plugin-set-display">
-            <div v-if="createSelectorModel(itemKey).value && createSelectorModel(itemKey).value.length > 0"
-              class="selected-plugins-full-width">
-              <div class="plugins-header">
-                <small class="text-grey">{{ t('core.shared.pluginSetSelector.selectedPluginsLabel') }}</small>
-              </div>
-              <div class="d-flex flex-wrap ga-2 mt-2">
-                <v-chip v-for="plugin in (createSelectorModel(itemKey).value || [])" :key="plugin" size="small" label
-                  color="primary" variant="outlined">
-                  {{ plugin === '*' ? t('core.shared.pluginSetSelector.allPluginsLabel') : plugin }}
-                </v-chip>
-              </div>
-            </div>
-          </v-col>
-        </v-row>
-
-        <v-row
-          v-if="!itemMeta?.invisible && itemMeta?._special === 'select_persona'"
-          class="persona-preview-row"
+    <v-expand-transition v-if="metadata[metadataKey]?.type === 'object'">
+      <div v-show="!isSectionCollapsed" class="object-config">
+        <div
+          v-for="([itemKey, itemMeta], index) in getVisibleItemEntries(false)"
+          :key="itemKey"
+          class="config-item"
         >
-          <v-col cols="12" class="persona-preview-display">
-            <PersonaQuickPreview :model-value="createSelectorModel(itemKey).value" editable />
-          </v-col>
-        </v-row>
+          <v-row v-if="!itemMeta?.invisible" class="config-row">
+            <v-col cols="12" :sm="itemMeta?.full_width ? 12 : 6" class="property-info">
+              <v-list-item density="compact">
+                <v-list-item-title class="property-name">
+                  {{ getItemDescription(itemKey, itemMeta) }}
+                  <span v-if="itemMeta?.show_key" class="property-key">({{ itemKey }})</span>
+                </v-list-item-title>
 
-        <v-divider class="config-divider"
-          v-if="hasVisibleEntriesAfter(getVisibleItemEntries(false), index)"></v-divider>
-      </div>
+                <v-list-item-subtitle class="property-hint">
+                  <span v-if="itemMeta?.obvious_hint && itemMeta?.hint" class="important-hint">‼️</span>
+                  <span v-html="renderHint(getItemHint(itemKey, itemMeta))"></span>
+                </v-list-item-subtitle>
+              </v-list-item>
+            </v-col>
+            <v-col cols="12" :sm="itemMeta?.full_width ? 12 : 6" class="config-input">
+              <TemplateListEditor
+                v-if="itemMeta?.type === 'template_list'"
+                v-model="createSelectorModel(itemKey).value"
+                :templates="itemMeta?.templates || {}"
+                :plugin-name="pluginName"
+                :plugin-i18n="pluginI18n"
+                :config-path="getItemPath(itemKey)"
+                class="config-field"
+              />
+              <ConfigItemRenderer
+                v-else
+                v-model="createSelectorModel(itemKey).value"
+                :item-meta="itemMeta || null"
+                :config-root="iterable"
+                :plugin-name="pluginName"
+                :plugin-i18n="pluginI18n"
+                :config-key="getItemPath(itemKey)"
+                :show-fullscreen-btn="!!itemMeta?.editor_mode"
+                @open-fullscreen="openEditorDialog(itemKey, iterable, itemMeta?.editor_theme, itemMeta?.editor_language)"
+              />
+            </v-col>
+          </v-row>
 
-      <div v-if="hasCollapsedItems()" class="collapsed-config-section">
-        <div class="collapsed-config-toggle-row">
-          <span
-            class="collapsed-config-toggle"
-            @click="toggleCollapsedItems"
+          <v-row v-if="!itemMeta?.invisible && itemMeta?._special === 'select_plugin_set'"
+            class="plugin-set-display-row">
+            <v-col cols="12" class="plugin-set-display">
+              <div v-if="createSelectorModel(itemKey).value && createSelectorModel(itemKey).value.length > 0"
+                class="selected-plugins-full-width">
+                <div class="plugins-header">
+                  <small class="text-grey">{{ t('core.shared.pluginSetSelector.selectedPluginsLabel') }}</small>
+                </div>
+                <div class="d-flex flex-wrap ga-2 mt-2">
+                  <v-chip v-for="plugin in (createSelectorModel(itemKey).value || [])" :key="plugin" size="small" label
+                    color="primary" variant="outlined">
+                    {{ plugin === '*' ? t('core.shared.pluginSetSelector.allPluginsLabel') : plugin }}
+                  </v-chip>
+                </div>
+              </div>
+            </v-col>
+          </v-row>
+
+          <v-row
+            v-if="!itemMeta?.invisible && itemMeta?._special === 'select_persona'"
+            class="persona-preview-row"
           >
-            {{ tmConfig('sections.moreConfig') }}
-            <v-icon end size="18">
-              {{ areCollapsedItemsVisible() ? 'mdi-chevron-up' : 'mdi-chevron-down' }}
-            </v-icon>
-          </span>
+            <v-col cols="12" class="persona-preview-display">
+              <PersonaQuickPreview :model-value="createSelectorModel(itemKey).value" editable />
+            </v-col>
+          </v-row>
+
+          <v-divider class="config-divider"
+            v-if="hasVisibleEntriesAfter(getVisibleItemEntries(false), index)"></v-divider>
         </div>
-        <div v-if="areCollapsedItemsVisible()">
-            <div
-              v-for="([itemKey, itemMeta], index) in getVisibleItemEntries(true)"
-              :key="itemKey"
-              class="config-item"
+
+        <div v-if="hasCollapsedItems()" class="collapsed-config-section">
+          <div class="collapsed-config-toggle-row">
+            <span
+              class="collapsed-config-toggle"
+              @click="toggleCollapsedItems"
             >
-              <v-row v-if="!itemMeta?.invisible" class="config-row">
-                <v-col cols="12" sm="6" class="property-info">
-                  <v-list-item density="compact">
-                    <v-list-item-title class="property-name">
-                      {{ getItemDescription(itemKey, itemMeta) }}
-                      <span v-if="itemMeta?.show_key" class="property-key">({{ itemKey }})</span>
-                    </v-list-item-title>
-
-                    <v-list-item-subtitle class="property-hint">
-                      <span v-if="itemMeta?.obvious_hint && itemMeta?.hint" class="important-hint">‼️</span>
-                      <span v-html="renderHint(getItemHint(itemKey, itemMeta))"></span>
-                    </v-list-item-subtitle>
-                  </v-list-item>
-                </v-col>
-                <v-col cols="12" sm="6" class="config-input">
-                  <TemplateListEditor
-                    v-if="itemMeta?.type === 'template_list'"
-                    v-model="createSelectorModel(itemKey).value"
-                    :templates="itemMeta?.templates || {}"
-                    :plugin-name="pluginName"
-                    :plugin-i18n="pluginI18n"
-                    :config-path="getItemPath(itemKey)"
-                    class="config-field"
-                  />
-                  <ConfigItemRenderer
-                    v-else
-                    v-model="createSelectorModel(itemKey).value"
-                    :item-meta="itemMeta || null"
-                    :config-root="iterable"
-                    :plugin-name="pluginName"
-                    :plugin-i18n="pluginI18n"
-                    :config-key="getItemPath(itemKey)"
-                    :show-fullscreen-btn="!!itemMeta?.editor_mode"
-                    @open-fullscreen="openEditorDialog(itemKey, iterable, itemMeta?.editor_theme, itemMeta?.editor_language)"
-                  />
-                </v-col>
-              </v-row>
-
-              <v-row v-if="!itemMeta?.invisible && itemMeta?._special === 'select_plugin_set'"
-                class="plugin-set-display-row">
-                <v-col cols="12" class="plugin-set-display">
-                  <div v-if="createSelectorModel(itemKey).value && createSelectorModel(itemKey).value.length > 0"
-                    class="selected-plugins-full-width">
-                    <div class="plugins-header">
-                      <small class="text-grey">{{ t('core.shared.pluginSetSelector.selectedPluginsLabel') }}</small>
-                    </div>
-                    <div class="d-flex flex-wrap ga-2 mt-2">
-                      <v-chip v-for="plugin in (createSelectorModel(itemKey).value || [])" :key="plugin" size="small" label
-                        color="primary" variant="outlined">
-                        {{ plugin === '*' ? t('core.shared.pluginSetSelector.allPluginsLabel') : plugin }}
-                      </v-chip>
-                    </div>
-                  </div>
-                </v-col>
-              </v-row>
-
-              <v-row
-                v-if="!itemMeta?.invisible && itemMeta?._special === 'select_persona'"
-                class="persona-preview-row"
+              {{ tmConfig('sections.moreConfig') }}
+              <v-icon end size="18">
+                {{ areCollapsedItemsVisible() ? 'mdi-chevron-up' : 'mdi-chevron-down' }}
+              </v-icon>
+            </span>
+          </div>
+          <div v-if="areCollapsedItemsVisible()">
+              <div
+                v-for="([itemKey, itemMeta], index) in getVisibleItemEntries(true)"
+                :key="itemKey"
+                class="config-item"
               >
-                <v-col cols="12" class="persona-preview-display">
-                  <PersonaQuickPreview :model-value="createSelectorModel(itemKey).value" editable />
-                </v-col>
-              </v-row>
+                <v-row v-if="!itemMeta?.invisible" class="config-row">
+                  <v-col cols="12" sm="6" class="property-info">
+                    <v-list-item density="compact">
+                      <v-list-item-title class="property-name">
+                        {{ getItemDescription(itemKey, itemMeta) }}
+                        <span v-if="itemMeta?.show_key" class="property-key">({{ itemKey }})</span>
+                      </v-list-item-title>
 
-              <v-divider class="config-divider"
-                v-if="hasVisibleEntriesAfter(getVisibleItemEntries(true), index)"></v-divider>
-            </div>
+                      <v-list-item-subtitle class="property-hint">
+                        <span v-if="itemMeta?.obvious_hint && itemMeta?.hint" class="important-hint">‼️</span>
+                        <span v-html="renderHint(getItemHint(itemKey, itemMeta))"></span>
+                      </v-list-item-subtitle>
+                    </v-list-item>
+                  </v-col>
+                  <v-col cols="12" sm="6" class="config-input">
+                    <TemplateListEditor
+                      v-if="itemMeta?.type === 'template_list'"
+                      v-model="createSelectorModel(itemKey).value"
+                      :templates="itemMeta?.templates || {}"
+                      :plugin-name="pluginName"
+                      :plugin-i18n="pluginI18n"
+                      :config-path="getItemPath(itemKey)"
+                      class="config-field"
+                    />
+                    <ConfigItemRenderer
+                      v-else
+                      v-model="createSelectorModel(itemKey).value"
+                      :item-meta="itemMeta || null"
+                      :config-root="iterable"
+                      :plugin-name="pluginName"
+                      :plugin-i18n="pluginI18n"
+                      :config-key="getItemPath(itemKey)"
+                      :show-fullscreen-btn="!!itemMeta?.editor_mode"
+                      @open-fullscreen="openEditorDialog(itemKey, iterable, itemMeta?.editor_theme, itemMeta?.editor_language)"
+                    />
+                  </v-col>
+                </v-row>
+
+                <v-row v-if="!itemMeta?.invisible && itemMeta?._special === 'select_plugin_set'"
+                  class="plugin-set-display-row">
+                  <v-col cols="12" class="plugin-set-display">
+                    <div v-if="createSelectorModel(itemKey).value && createSelectorModel(itemKey).value.length > 0"
+                      class="selected-plugins-full-width">
+                      <div class="plugins-header">
+                        <small class="text-grey">{{ t('core.shared.pluginSetSelector.selectedPluginsLabel') }}</small>
+                      </div>
+                      <div class="d-flex flex-wrap ga-2 mt-2">
+                        <v-chip v-for="plugin in (createSelectorModel(itemKey).value || [])" :key="plugin" size="small" label
+                          color="primary" variant="outlined">
+                          {{ plugin === '*' ? t('core.shared.pluginSetSelector.allPluginsLabel') : plugin }}
+                        </v-chip>
+                      </div>
+                    </div>
+                  </v-col>
+                </v-row>
+
+                <v-row
+                  v-if="!itemMeta?.invisible && itemMeta?._special === 'select_persona'"
+                  class="persona-preview-row"
+                >
+                  <v-col cols="12" class="persona-preview-display">
+                    <PersonaQuickPreview :model-value="createSelectorModel(itemKey).value" editable />
+                  </v-col>
+                </v-row>
+
+                <v-divider class="config-divider"
+                  v-if="hasVisibleEntriesAfter(getVisibleItemEntries(true), index)"></v-divider>
+              </div>
+          </div>
         </div>
-      </div>
 
-    </div>
+      </div>
+    </v-expand-transition>
   </v-card>
 
   <!-- Full Screen Editor Dialog -->
@@ -473,12 +529,69 @@ function getSpecialSubtype(value) {
 <style scoped>
 .config-section {
   margin-bottom: 4px;
+  padding-bottom: 8px;
+  transition:
+    margin-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    padding-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* A folded section has no body, so nothing may sit below the fold header. */
+.config-section--folded {
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
 .config-title {
   /* font-weight: 600; */
   font-size: 1.3rem;
   color: var(--v-theme-primaryText);
+}
+
+.config-section-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.config-section-head--foldable {
+  cursor: pointer;
+  user-select: none;
+  /* Fill the card padding so the hover background reaches the card edges,
+     matching the template_list entry header. The card clips the corners. */
+  padding: 24px 16px 8px;
+  margin: -16px -16px 0;
+  border-radius: 0;
+  transition:
+    background-color 0.2s ease,
+    padding-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-bottom 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.config-section-head--foldable:hover {
+  background-color: rgba(0, 0, 0, 0.02);
+}
+
+/* Folded sections have no body, so the header absorbs the card bottom padding too
+   and the highlight fills the whole card. */
+.config-section-head--folded {
+  padding-bottom: 20px;
+  margin-bottom: 0;
+}
+
+.config-section-head--foldable:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
+}
+
+.config-section-head__chevron {
+  margin-top: 6px;
+  color: var(--v-theme-secondaryText);
+  flex-shrink: 0;
+}
+
+.config-section-head__text {
+  flex: 1;
+  min-width: 0;
 }
 
 .config-hint {
